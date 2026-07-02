@@ -47,7 +47,7 @@ We use the `uv` tool for python dependency management and creating virtual envir
 
 First make sure you have `uv` installed, see the [installation documentation](https://docs.astral.sh/uv/getting-started/installation/) for details and alternative installation methods.
 There is a python package that can be installed with `pip install uv`, however the standalone installer is preferred.
-
+g
 ##### macOS and Linux
 
 ```console
