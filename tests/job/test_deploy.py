@@ -55,6 +55,7 @@ class FakeSimCfg:
         self.sv_flist_gen_cmd = "gen_cmd"
         self.sv_flist_gen_opts = []
         self.sv_flist_gen_dir = "path/to/gen"
+        self.flist_file = ""
 
         self.cov = True
         self.cov_db_dir = "path"
@@ -154,6 +155,32 @@ class TestCompileSim:
             sim_overrides=sim_overrides,
         )
 
+        assert_that(job.cmd, equal_to(exp_cmd))
+
+    @staticmethod
+    def test_cmd_flist_file_no_gen_cmd() -> None:
+        """When sv_flist_gen_cmd is empty and flist_file is set, -f is prepended to build_opts."""
+        job = _build_compile_sim(
+            sim_overrides={
+                "sv_flist_gen_cmd": "",
+                "sv_flist_gen_dir": "",
+                "flist_file": "/path/to/design.f",
+            },
+        )
+
+        exp_cmd = (
+            "make -f path/to/makefile build "
+            "build_cmd=path/to/build_name/build_cmd "
+            "build_dir=build/dir "
+            "build_opts='-f /path/to/design.f -b path/here -a \"Quoted\"' "
+            "post_build_cmds='C && D' "
+            "post_build_opts=E "
+            "pre_build_cmds='A && B' "
+            "proj_root=/project "
+            "sv_flist_gen_cmd='' "
+            "sv_flist_gen_dir='' "
+            "sv_flist_gen_opts=''"
+        )
         assert_that(job.cmd, equal_to(exp_cmd))
 
     @staticmethod

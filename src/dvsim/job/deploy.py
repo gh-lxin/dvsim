@@ -427,6 +427,7 @@ class CompileSim(Deploy):
         self.sv_flist_gen_cmd: str = ""
         self.sv_flist_gen_dir: str = ""
         self.sv_flist_gen_opts: list[str] = []
+        self.flist_file: str = ""
         self.pre_build_cmds: list[str] = []
         self.build_cmd: str = ""
         self.build_dir: str = ""
@@ -488,6 +489,7 @@ class CompileSim(Deploy):
                 "build_pass_patterns": False,
                 "build_timeout_mins": False,
                 "cov_db_dir": False,
+                "flist_file": False,
             },
         )
 
@@ -508,6 +510,12 @@ class CompileSim(Deploy):
 
         if self.sim_cfg.args.build_timeout_mins is not None:
             self.build_timeout_mins = self.sim_cfg.args.build_timeout_mins
+
+        # When no flist generation command is set but a pre-built filelist is
+        # available, skip the gen step and pass the file directly to the build
+        # tool via -f.
+        if not self.sv_flist_gen_cmd and self.flist_file:
+            self.build_opts = [f"-f {self.flist_file}"] + self.build_opts
 
     def pre_launch(self) -> Callable[[], None]:
         """Get pre-launch callback."""
