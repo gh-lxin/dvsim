@@ -5,6 +5,7 @@
 import pathlib
 import sys
 
+import dvsim
 from dvsim.flow.base import FlowCfg
 from dvsim.flow.cdc import CdcCfg
 from dvsim.flow.formal import FormalCfg
@@ -41,6 +42,11 @@ def _load_cfg(path, initial_values):
 
     # Start by loading up the hjson file and any included files
     hjson_data = load_hjson(path, initial_values)
+
+    # Inject dvsim_root as a built-in variable so it is available as a
+    # wildcard ({dvsim_root}) in all hjson configurations.
+    if "dvsim_root" in initial_values:
+        hjson_data["dvsim_root"] = initial_values["dvsim_root"]
 
     # Look up the value of flow in the loaded data. This is a required field,
     # and tells us what sort of FlowCfg to make.
@@ -113,9 +119,20 @@ def make_cfg(path, args, proj_root) -> FlowCfg:
     of the project.
 
     """
+    # Determine the dvsim installation root by walking up from the
+    # dvsim package's __file__ to find the top-level directory
+    # (the one containing pyproject.toml / src layout).
+    _dvsim_pkg = pathlib.Path(dvsim.__file__).resolve().parent
+    _dvsim_root = _dvsim_pkg
+    for _ in range(5):
+        if (_dvsim_root / "pyproject.toml").exists():
+            break
+        _dvsim_root = _dvsim_root.parent
+
     initial_values = {
         "proj_root": proj_root,
         "self_dir": pathlib.Path(path).parent,
+        "dvsim_root": str(_dvsim_root),
     }
     if args.tool is not None:
         initial_values["tool"] = args.tool

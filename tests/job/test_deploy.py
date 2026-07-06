@@ -162,6 +162,7 @@ class TestCompileSim:
         """When sv_flist_gen_cmd is empty and flist_file is set, -f is prepended to build_opts."""
         job = _build_compile_sim(
             sim_overrides={
+                "dry_run": False,
                 "sv_flist_gen_cmd": "",
                 "sv_flist_gen_dir": "",
                 "flist_file": "/path/to/design.f",
