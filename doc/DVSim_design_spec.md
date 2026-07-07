@@ -44,7 +44,19 @@ CLI (cli/run.py)
 
 #### 3.1.1 `import_cfgs` — 字段级叠加合并
 
-**语义**：把指定文件的字段**合并到当前这一个配置对象**（同一个 `FlowCfg` 实例）。用于复用公共配置。
+**语义**：把指定文件的字段**合并到当前这一个配置对象**（同一个 `FlowCfg` 实例）。机制上是通用字段合并，但**主要用途是导入可复用的 testlist（测试列表）片段**——每个 testlist 文件通常打包一组相关的 `tests`，以及配套的 `build_modes`、`run_modes`、`regressions` 定义，供多个 IP 的 sim_cfg 按需叠加引用。
+
+**典型导入内容**：
+
+| 类别 | 常见字段 | 说明 |
+|---|---|---|
+| 公共基础设施 | `flow`、`build_opts`、`run_opts`、`regressions`（smoke/all/nightly） | 如 `common_sim_cfg.hjson`，提供工具链默认与全局 regression |
+| **testlist 片段** | `tests` | 一组可复用测试定义（`{name}` 通配符在展开时替换为 IP 名） |
+| testlist 配套 | `build_modes` | 测试依赖的编译模式（如 `cover_reg_top`） |
+| testlist 配套 | `run_modes` | 测试依赖的运行模式（如 `csr_tests_mode`） |
+| testlist 配套 | `regressions` | 将上述 tests 分组为 `smoke`、`sw_access` 等 regression 目标 |
+
+testlist 文件本身也可再 `import_cfgs` 其他 testlist（如 `stress_tests.hjson` 导入 `stress_all_test.hjson`），形成分层复用。
 
 **使用规则**：
 
@@ -58,34 +70,83 @@ CLI (cli/run.py)
 | 出现位置 | 可在任意层级的文件中出现（顶层或被导入文件中均可再嵌套） | — |
 | 去重 | 导入文件中的 `import_cfgs` 自身也会被递归展开 | `hjson.py:81` |
 
-**举例**（参考 OpenTitan `uart_sim_cfg.hjson`）：
+**举例 1**：IP sim_cfg 叠加公共配置与多个 testlist
 
 ```hjson
 // hw/ip/uart/dv/uart_sim_cfg.hjson
 {
   name: uart
   tool: vcs
-  reseed: 10
   build_opts: ["+define+UART_DBG"]
 
-  // 叠加导入公共配置：common 的 build_opts 会与本文件的拼接，
-  // common 的标量默认值会被本文件的非默认值覆盖
-  import_cfgs: ["{proj_root}/hw/dv/tools/dvsim/common_sim_cfg.hjson",
-                "{proj_root}/hw/dv/tools/dvsim/prj_common_sim_cfg.hjson"]
+  // 公共基础设施 + 可复用 testlist 片段
+  import_cfgs: [
+    "{proj_root}/hw/dv/tools/dvsim/common_sim_cfg.hjson",
+    "{proj_root}/hw/dv/tools/dvsim/tests/csr_tests.hjson",
+    "{proj_root}/hw/dv/tools/dvsim/tests/intr_test.hjson",
+    "{proj_root}/hw/dv/tools/dvsim/tests/alert_test.hjson"
+  ]
 
+  // IP 专属测试追加到已导入的 tests 列表末尾
   tests: [{ name: uart_smoke, uvm_test_seq: uart_smoke_vseq }]
 }
 ```
 
-合并效果（假设 `common_sim_cfg.hjson` 中 `build_opts: ["+define+UVM"]`）：
+**举例 2**：testlist 文件内容（`tools/dvsim/tests/csr_tests.hjson`）
+
+```hjson
+{
+  build_modes: [{ name: cover_reg_top }]
+
+  run_modes: [{
+    name: csr_tests_mode
+    uvm_test_seq: "{name}_common_vseq"
+    run_opts: ["+en_scb=0"]
+  }]
+
+  tests: [{
+    name: "{name}_csr_hw_reset"
+    build_mode: "cover_reg_top"
+    en_run_modes: ["csr_tests_mode"]
+    reseed: 1
+  }, {
+    name: "{name}_csr_rw"
+    build_mode: "cover_reg_top"
+    en_run_modes: ["csr_tests_mode"]
+    reseed: 5
+  }]
+
+  regressions: [{
+    name: smoke
+    tests: ["{name}_csr_hw_reset", "{name}_csr_rw"]
+  }, {
+    name: sw_access
+    tests: ["{name}_csr_hw_reset", "{name}_csr_rw", ...]
+  }]
+}
+```
+
+导入后，`{name}` 在通配符展开阶段替换为 `uart`，生成 `uart_csr_hw_reset`、`uart_csr_rw` 等测试名。
+
+**合并效果**（以 `csr_tests.hjson` + IP 本地 `build_opts` 为例）：
 
 ```
-最终 build_opts = ["+define+UART_DBG"]  (本文件)
-               + ["+define+UVM"]        (common 导入，list 拼接)
-               = ["+define+UART_DBG", "+define+UVM"]
+最终 tests       = [uart_smoke]           (IP 本地)
+                 + [{name}_csr_hw_reset, {name}_csr_rw, ...]  (testlist，list 拼接)
+                 + [{name}_intr_test, ...]                     (其他 testlist)
 
-最终 reseed = 10  (本文件非默认值胜出，common 若为默认值则被覆盖)
+最终 build_modes = []                   (common 默认)
+                 + [cover_reg_top]       (csr_tests)
+                 + [cover_reg_top]       (intr_test，同名 mode 后续走路径 B merge_mode 合并)
+
+最终 regressions = [smoke, all, nightly] (common)
+                 + [smoke, sw_access]    (csr_tests，list 拼接；同名 regression 走路径 B 合并)
+
+最终 build_opts  = ["+define+UART_DBG"]  (IP 本地)
+                 + ["+define+UVM", ...]  (common，list 拼接)
 ```
+
+> **要点**：`import_cfgs` 对 list 字段（`tests`、`build_modes`、`run_modes`、`regressions`）做**拼接**；同名 mode/regression 的字段级合并走路径 B（`merge_mode`，见 3.2）。IP sim_cfg 只需写 IP 专属 tests，通用 CSR/中断/告警等测试通过 import testlist 获得。
 
 #### 3.1.2 `use_cfgs` — 配置级聚合（primary 配置）
 
@@ -197,95 +258,188 @@ CLI `--tool` 最高；`overrides` 次之且最强制；其后是 mode 内合并�
 
 #### 3.2.1 示例：`reseed` 的多路径叠加处理
 
-`reseed`（每个测试的重跑次数）是最典型的"多路径赋值"字段，它贯穿所有三条路径加命令行。下面用 `uart` 配置演示完整叠加过程。
+`reseed`（每个测试的重跑次数）是最典型的"多路径赋值"字段。它可在 **四个层级** 分别设置，且 **regression 的影响分配置阶段与运行阶段两步**：
 
-**处理链路（优先级从低到高）**：
+| 层级 | 设置位置 | 合并路径 | 生效时机 |
+|---|---|---|---|
+| sim_cfg 顶层 | `reseed: N` | 路径 A（import 合并）→ 路径 C（overrides） | 配置加载时 |
+| test 字典 | `tests: [{ name: ..., reseed: N }]` | 路径 B（test 构造 + 回填） | `_create_objects` 时 |
+| regression 字典 | `regressions: [{ name: ..., reseed: N }]` | 路径 B（同名 regression `merge_mode`） | `_create_objects` 时合并定义；**`-i` 选中该 regression 时**才覆盖 test |
+| 命令行 | `--reseed` / `--reseed-multiplier` | 最高优先级 | `_create_build_and_run_list` 时 |
+
+下面用 `uart` 配置演示完整叠加过程，重点说明 **regression 设置**。
+
+**处理链路（配置阶段 → 运行阶段，从低到高）**：
 
 ```
-① sim_cfg.reseed (hjson 顶层 / import_cfgs 合并)     (hjson.py:113-190)
-  ↓ test 字典的 reseed 写入 Test 对象，未设的用 sim_cfg 顶层值回填
-② Test 构造 + 回填 (modes.py:23-42, test.py:80-93)
-  ↓ 命令行无条件覆盖
-③ --reseed N (命令行)                                (sim/flow.py:429-430)
-  ↓ 最后按倍率放大
-④ --reseed-multiplier X (命令行)                     (sim/flow.py:435-436)
+① sim_cfg.reseed (顶层 / import_cfgs 合并)              路径 A
+  ↓ _process_overrides
+② overrides 重载 sim_cfg.reseed                         路径 C
+  ↓ Test 构造 + sim_cfg 回填
+③ test 字典 reseed → Test 对象                          路径 B（test.py:80-93）
+  ↓ Regression.create_regressions + 同名 merge_mode
+④ regression 字典 reseed → Regression 对象（合并定义）   路径 B（regression.py:45-75, modes.py:52-137）
+  ↓ -i 选中 regression 时 merge_regression_opts
+⑤ regression.reseed 覆盖该 regression 下 test.reseed    运行阶段（regression.py:177-179）
+  ↓ 命令行
+⑥ --reseed N                                            (sim/flow.py:429-430)
+  ↓
+⑦ --reseed-multiplier X                                 (sim/flow.py:435-436)
 ```
+
+> **regression 关键语义**：
+> - 步骤 ④ 仅把各文件中的 regression 定义**合并为一个 Regression 对象**（同名 `merge_mode`），此时 `reseed` 按标量规则合并，但**尚未改写任何 test**。
+> - 步骤 ⑤ 仅在 **`-i` 选中该 regression** 时触发（`sim/flow.py:378-396`）。直接 `-i uart_smoke` 选单个 test **不经过** regression，regression 的 `reseed` **不生效**。
+> - regression 的 `reseed` 一旦在步骤 ⑤ 生效，会**无条件覆盖**其下所有 test 的 reseed（抹平 test 级差异）。
 
 **场景设定**：
 
-- `common_sim_cfg.hjson`：未设 `reseed`（不存在该字段）
-- `uart_sim_cfg.hjson`：
-  ```hjson
-  reseed: 10                      // 顶层默认（路径 A）
-  import_cfgs: [".../common_sim_cfg.hjson"]
-  tests: [
-    { name: uart_smoke },                          // 未设 reseed
-    { name: uart_fifo_reset, reseed: 200 }         // 显式设 200
+```hjson
+// uart_sim_cfg.hjson
+{
+  name: uart
+  reseed: 10
+  import_cfgs: [
+    ".../common_sim_cfg.hjson",
+    ".../tests/csr_tests.hjson"
   ]
-  ```
+  overrides: [{ name: reseed, value: 5 }]
+  tests: [
+    { name: uart_smoke },
+    { name: uart_fifo_reset, reseed: 200 }
+  ]
+}
+```
+
+相关 import 文件中的 regression / test 定义：
+
+```hjson
+// common_sim_cfg.hjson
+regressions: [
+  { name: smoke,  tests: [], reseed: 1, run_opts: ["+smoke_test=1"] }
+  { name: all }
+  { name: all_once, reseed: 1 }
+  { name: nightly, en_sim_modes: ["cov"] }
+]
+
+// csr_tests.hjson（展开后 {name} → uart）
+regressions: [
+  { name: smoke,     tests: ["uart_csr_hw_reset", "uart_csr_rw"] }
+  { name: sw_access, tests: ["uart_csr_hw_reset", "uart_csr_rw", ...] }
+]
+tests: [
+  { name: uart_csr_hw_reset, reseed: 1 }
+  { name: uart_csr_rw,       reseed: 5 }
+  ...
+]
+```
 
 **逐步演算**：
 
-**步骤 1 — import_cfgs 合并顶层 reseed（对应链路 ①，路径 A，`set_target_attribute`）**
-- `common` 无 reseed → 不影响
-- `uart` 的 `reseed: 10` 写入 `sim_cfg.reseed = 10`
-- ⚠️ 若 `common` 也设了 `reseed: 5`：两者都是非默认 int 且不等 → **冲突报错**（`hjson.py:183-190`）。因此公共 cfg 通常**不设** reseed，留给 IP cfg 决定。
+**步骤 1 — import_cfgs 合并顶层 reseed（链路 ①，路径 A）**
+- `common` 无顶层 reseed → 不影响
+- `uart` 的 `reseed: 10` → `sim_cfg.reseed = 10`
 
-**步骤 2 — 创建 Test 对象（对应链路 ②，`test.py:34-56`）**
+**步骤 1b — overrides 重载顶层 reseed（链路 ②，路径 C）**
+- `overrides: [{ name: reseed, value: 5 }]` → `sim_cfg.reseed = 5`
 
-`Mode.__init__` 遍历 test 字典的 keys，对存在的 key 调用 `setattr` 写入 Test 对象（`modes.py:32-42`）：
+**步骤 2–3 — Test 构造与回填（链路 ③，路径 B）**
 
-- `uart_smoke`：test 字典未设 reseed → 不写入
-- `uart_fifo_reset`：test 字典有 `reseed: 200` → `test.reseed = 200`
-
-**步骤 3 — sim_cfg 默认值回填（对应链路 ②，`test.py:77-93`）**
-- `uart_smoke`：未设 reseed → 用 `sim_cfg.reseed=10` 回填 → `test.reseed = 10`
-- `uart_fifo_reset`：已设 reseed=200 → **不回填**，保持 200
-
-此时各 test 的 reseed：
-
-| test | reseed | 来源 |
-|---|---|---|
-| uart_smoke | 10 | 顶层默认回填 |
-| uart_fifo_reset | 200 | test 字典显式值 |
-
-**步骤 4 — 命令行 `--reseed 5`（`sim/flow.py:429-430`）**
-
-```python
-if self.reseed_ovrd is not None:
-    test.reseed = self.reseed_ovrd
-```
-
-- 无条件覆盖**所有** test：`uart_smoke → 5`，`uart_fifo_reset → 5`
-
-**步骤 5 — 命令行 `--reseed-multiplier 3`（`sim/flow.py:435-436`）**
-
-```python
-scaled = round(test.reseed * self.reseed_multiplier)
-test.reseed = max(1, scaled)
-```
-
-- 在步骤 3 的结果上按倍率放大（保底 1）：
-  - `uart_smoke`: round(10×3) = 30
-  - `uart_fifo_reset`: round(200×3) = 600
-
-**最终结果汇总**（不同命令行组合）：
-
-| 命令行 | uart_smoke | uart_fifo_reset | 说明 |
+| test | test 字典 reseed | 回填后 reseed | 来源 |
 |---|---|---|---|
-| （无） | 10 | 200 | 顶层默认 + test 显式（步骤 1-3） |
-| `--reseed 5` | 5 | 5 | 命令行全覆盖（步骤 4） |
-| `--reseed-multiplier 3` | 30 | 600 | 按比例放大，保持比例（步骤 5） |
-| `--reseed 5 --reseed-multiplier 3` | 15 | 15 | 先覆盖为 5，再 ×3 |
-| `--fixed-seed 123` | 1 | 1 | 隐含 `--reseed 1`（`cli/run.py:724`） |
+| uart_smoke | 未设 | 5 | sim_cfg 顶层（经 overrides） |
+| uart_fifo_reset | 200 | 200 | test 显式值 |
+| uart_csr_hw_reset | 1 | 1 | test 显式值 |
+| uart_csr_rw | 5 | 5 | test 显式值 |
+
+**步骤 4 — regression 对象创建与同名合并（链路 ④，路径 B）**
+
+`Regression.create_regressions` 对 import 链中**同名 regression** 做 `merge_mode`（与 test 合并规则相同）：
+
+| regression | 来源 | reseed | tests |
+|---|---|---|---|
+| `smoke` | common | 1 | `[]` |
+| `smoke` | csr_tests | 未设（None） | `[uart_csr_hw_reset, uart_csr_rw]` |
+| **合并后 `smoke`** | — | **1** | `[uart_csr_hw_reset, uart_csr_rw]` |
+| `sw_access` | csr_tests | 未设 | `[uart_csr_hw_reset, uart_csr_rw, ...]` |
+| `all` | common | 未设 | `None`（表示跑全部 test） |
+| `all_once` | common | 1 | `None` |
+| `nightly` | common | 未设 | `None` |
+
+合并细节（以 `smoke` 为例）：
+- `reseed`：common 设 1，csr_tests 未设 → 保留 1（`modes.py:77` 跳过 None）
+- `tests`：list 拼接 `[] + [uart_csr_hw_reset, uart_csr_rw]` → 最终仅含 CSR 两个 test（`uart_smoke` **不在** smoke regression 内）
+- `run_opts`：common 的 `["+smoke_test=1"]` 保留，选中 smoke 时附加到各 test
+
+⚠️ 若两个文件对同名 regression 都设了不同的非默认 `reseed`（如 common: 1、IP: 5），`merge_mode` 会**冲突报错**（`modes.py:128-137`）。
+
+**步骤 5 — 选定 regression 时覆盖 test.reseed（链路 ⑤，运行阶段）**
+
+`merge_regression_opts`（`regression.py:177-179`）仅在 regression 被 `-i` 选中后执行：
+
+```python
+if self.reseed is not None:
+    test.reseed = self.reseed
+```
+
+不同 `-i` 选择的效果（步骤 2–3 之后、无命令行 `--reseed`）：
+
+| `-i` 选择 | 涉及 test | 步骤 ⑤ 后 reseed | 说明 |
+|---|---|---|---|
+| `uart_smoke` | uart_smoke | 5 | 直接选 test，**不经过** regression，regression reseed 不生效 |
+| `uart_fifo_reset` | uart_fifo_reset | 200 | 同上 |
+| `smoke` | uart_csr_hw_reset, uart_csr_rw | **1, 1** | smoke regression `reseed: 1` 覆盖 test 级 1/5 |
+| `sw_access` | uart_csr_hw_reset, uart_csr_rw, ... | 1, 5, ... | sw_access **无** regression reseed，保留各 test 自身值 |
+| `all` | 全部 test | 5, 200, 1, 5, ... | all **无** regression reseed，保留各 test 自身值 |
+| `all_once` | 全部 test | **1, 1, 1, 1, ...** | all_once `reseed: 1` 强制全部单次 |
+
+**步骤 6 — 命令行 `--reseed 5`（链路 ⑥）**
+
+无条件覆盖 run_list 中**所有** test，无论其来自 regression 还是直接选取。
+
+**步骤 7 — 命令行 `--reseed-multiplier 3`（链路 ⑦）**
+
+在步骤 6 结果上按比例放大（保底 1）。
+
+**最终结果汇总**（代表性组合）：
+
+| 命令行 / 条件 | uart_smoke | uart_csr_rw | 说明 |
+|---|---|---|---|
+| `-i uart_smoke` | 5 | — | 不跑 csr；regression reseed 不介入 |
+| `-i smoke` | — | 1 | smoke regression 覆盖 csr test reseed |
+| `-i sw_access` | — | 5 | 无 regression reseed，保留 test 级值 |
+| `-i all_once` | 1 | 1 | all_once 强制全部 reseed=1 |
+| `-i smoke --reseed-multiplier 3` | — | 3 | smoke 先压到 1，再 ×3 |
+| `-i all --reseed-multiplier 3` | 15 | 15 | 保留各 test 比例（5/200/1/5…）再放大 |
+| `--fixed-seed 123` | 1 | 1 | 隐含 `--reseed 1`（`cli/run.py:971-972`） |
+
+**regression 与 reseed 的典型配置模式**：
+
+```hjson
+// 模式 1：smoke 快速回归 — 强制所有 test 只跑 1 次
+{ name: smoke, tests: [...], reseed: 1, run_opts: ["+smoke_test=1"] }
+
+// 模式 2：all_once 全量单次 — 所有 test 各跑 1 次
+{ name: all_once, reseed: 1 }    // tests 缺省为 None → 跑全部
+
+// 模式 3：按 test 自身 reseed 跑 — regression 不设 reseed
+{ name: sw_access, tests: ["uart_csr_hw_reset", "uart_csr_rw", ...] }
+// uart_csr_hw_reset reseed:1, uart_csr_rw reseed:5 各自保留
+
+// 模式 4：testlist 与 common 共建 smoke — 同名 merge_mode 合并
+// common: { name: smoke, reseed: 1, tests: [] }
+// csr_tests: { name: smoke, tests: ["uart_csr_hw_reset", "uart_csr_rw"] }
+// → 合并后 smoke 继承 reseed:1 + csr 的 tests 列表
+```
 
 **关键要点**：
 
-- `reseed` 作为**标量**，在 import_cfgs 合并时遵循"默认值让位、冲突报错"规则（路径 A）——公共 cfg 通常不设 reseed 以避免冲突。
-- **test 级显式值**优先于 **sim_cfg 顶层默认值**：`test.py:84` 仅在 test 未设 reseed 时才用 sim_cfg 值回填。
-- `--reseed` 是**无条件覆盖**，会抹平所有 test 间的 reseed 差异。
-- `--reseed-multiplier` 在最终值上**按比例放大**，保持 test 间运行数比例，常用于夜间回归加量。
-- `--fixed-seed S` 隐含 `--reseed 1`（固定种子单次运行）。
+- `reseed` 可在 sim_cfg 顶层、test 字典、regression 字典三处配置；`overrides`（路径 C）**仅能改写 sim_cfg 顶层**。
+- **test 级显式值**优先于 sim_cfg 顶层回填（`test.py:84`）；但 **regression 级 reseed 在 `-i` 选中时覆盖 test 级**（`regression.py:177-179`）。
+- regression 的 reseed 配置分两步：**配置阶段**同名合并（路径 B `merge_mode`），**运行阶段**选中才覆盖 test（`merge_regression_opts`）。
+- 直接 `-i <test_name>` 不触发 regression 逻辑，test 保留步骤 2–3 的 reseed。
+- `common_sim_cfg.hjson` 中 `smoke`（`reseed: 1`）和 `all_once`（`reseed: 1`）是项目级快速/单次回归约定；testlist 中的 regression（如 `sw_access`）通常不设 reseed，保留各 test 的独立运行次数。
+- `--reseed` 最终无条件覆盖一切配置层级的 reseed；`--reseed-multiplier` 在最终值上按比例放大。
 
 ### 3.3 工具无关性
 
@@ -304,11 +458,204 @@ CLI `--items` 支持 glob 匹配（`sim/flow.py:368-376`），同时匹配 regre
 
 ### 3.5 并行调度与资源管理
 
-- **DAG 调度器**（`scheduler/core.py`）：基于 asyncio 事件驱动，构建有向无环图（Kahn 拓扑校验），就绪堆按 `weight > timeout > dependents` 排序。
-- **六态状态机**：`S`(scheduled) → `Q`(queued) → `R`(running) → `P/F/K`(终态)。依赖传播按 `needs_all_dependencies_passing` 决定是否要求全部上游通过。
-- **资源管理**（`scheduler/resources.py`）：`-R RESOURCE=COUNT` 限制并发资源，`--on-missing-resource` 控制未知资源策略。
-- **优雅退出**：SIGINT/SIGTERM 批量 kill 运行作业、取消排队（`_handle_exit_signal`）。
-- **后端**（`launcher/`）：`--local`/`--remote`、LSF/Slurm/NC，`--max-parallel` 限制本地并发。
+DVSim 的并行执行分两层：**Scheduler**（`scheduler/core.py`）在 Python 进程内维护 DAG 依赖与就绪队列；**Launcher/Backend**（`launcher/lsf.py` 等）负责把就绪 job 真正提交到 LSF 集群。`--remote` 时先把 repo 复制到 scratch，再通过 `DVSIM_BACKEND=lsf`（或 `DVSIM_LAUNCHER=lsf`）选用 LSF 后端。
+
+#### 3.5.1 Sim 流程的 Job DAG（build → run → cov）
+
+一次典型 sim 回归（`sim/flow.py:468-565`）会生成如下 Deploy 对象并转为 `JobSpec` DAG：
+
+| 阶段 | Deploy 类 | `target` | `weight` | 依赖 | `needs_all_deps_pass` |
+|---|---|---|---|---|---|
+| 编译 | `CompileSim` | `build` | 5 | 无 | — |
+| 仿真 | `RunTest` | `run` | 1 | 对应 `CompileSim` | `True`（默认） |
+| 覆盖率合并 | `CovMerge` | `cov_merge` | 10 | 全部 `RunTest` | `False`（任一 run 通过即可） |
+| 覆盖率报告 | `CovReport` | `cov_report` | 10 | `CovMerge` | `True`（默认） |
+
+**举例**：`uart` IP，`default` 与 `cover_reg_top` 两个 build_mode；`-i smoke` 含 `uart_smoke`（reseed=5）和 `uart_csr_hw_reset`（reseed=1）：
+
+```mermaid
+flowchart TB
+    subgraph build_phase["Build 阶段 (weight=5, 优先调度)"]
+        B1["CompileSim<br/>uart:default"]
+        B2["CompileSim<br/>uart:cover_reg_top"]
+    end
+
+    subgraph run_phase["Run 阶段 (weight=1)"]
+        R1["RunTest 0.uart_smoke<br/>seed=S0"]
+        R2["RunTest 1.uart_smoke<br/>seed=S1"]
+        R3["RunTest ...<br/>共 5 次 reseed"]
+        R4["RunTest 0.uart_csr_hw_reset<br/>seed=S4"]
+    end
+
+    subgraph cov_phase["Coverage 阶段 (weight=10, --cov 时)"]
+        CM["CovMerge"]
+        CR["CovReport"]
+    end
+
+    B1 --> R1 & R2 & R3
+    B2 --> R4
+    R1 & R2 & R3 & R4 --> CM
+    CM --> CR
+```
+
+要点：
+- 每个 **build_mode** 对应一个 `CompileSim`；等价 build 会去重（`sim/flow.py:491-501`）。
+- 每个 **(test, reseed_index)** 对应一个 `RunTest`，`dependencies` 指向其 build_mode 的 `CompileSim`（`deploy.py:688-689`）。
+- `RunTest.qual_name` 形如 `0.uart_smoke.<seed>`（`deploy.py:744`），用于区分同 test 多次 reseed。
+- build 失败 → 依赖它的 run 被 **Killed**（`needs_all_dependencies_passing=True`）；`CovMerge` 只要有一个 run 通过就会执行。
+
+#### 3.5.2 Scheduler 六态状态机
+
+Scheduler 基于 asyncio 事件驱动（`scheduler/core.py`），每个 job 经历：
+
+```
+S (Scheduled)  等待上游依赖完成
+  ↓ 依赖满足 (_mark_job_ready)
+Q (Queued)     在就绪堆中，等待槽位 / 资源 / backend 并发额度
+  ↓ 选中并 submit_many (_mark_job_running)
+R (Running)    已提交到 backend，远端或本地执行中
+  ↓ poll 完成
+P / F / K      Passed / Failed / Killed（终态）
+```
+
+就绪堆排序（`scheduler/runner.py:108-112`）：**weight 高者优先** → timeout 大者优先 → dependents 多者优先。因此 build（weight=5）通常先于 run（weight=1）出队，cov（weight=10）最后执行。
+
+并发限制三层叠加（`_schedule_ready_jobs`，`core.py:553-603`）：
+
+| 层级 | 控制项 | 说明 |
+|---|---|---|
+| Scheduler | `--max-parallel` / `max_parallelism` | 全局同时在跑的 job 上限 |
+| Backend | `LsfLauncher.max_parallel` | LSF 后端并发提交上限（与 `--max-parallel` 同步设置） |
+| Resource | `-R VCS=30` 等 | 按 license/资源名限制并行（`scheduler/resources.py`） |
+
+每个 job 默认申请 `{TOOL.upper(): 1}` 资源（如 `VCS: 1`，`deploy.py:240-244`），与 `-R` 配合使用。
+
+#### 3.5.3 LSF 管理全过程（结合 build / run job）
+
+LSF 后端通过 `LegacyLauncherAdapter`（`runtime/legacy.py`）接入 Scheduler：Scheduler 调用 `submit_many` → 每个 job 创建一个 `LsfLauncher` → 后台 poller 周期性 `poll()` 直到终态。
+
+**LSF Job Array 分组规则**（`deploy.py:267, 505, 746`）：
+
+| 阶段 | `job_name` 格式 | 示例 | 含义 |
+|---|---|---|---|
+| Build | `{scratch}_build_{build_mode}` | `uart_20250707_build_default` | 同 build_mode 的 CompileSim 合并为一个 array |
+| Run | `{scratch}_run_{build_mode}` | `uart_20250707_run_default` | 同 build_mode 下所有 RunTest 合并为一个 array |
+| Cov | `{scratch}_cov_merge` / `_cov_report` | 各一个 array | 通常每 cfg 仅 1 个 job |
+
+**完整 LSF 提交流程**（以 `uart_20250707_run_default` array 含 5 个 RunTest 为例）：
+
+```mermaid
+sequenceDiagram
+    participant SCH as Scheduler<br/>(core.py)
+    participant ADP as LegacyLauncherAdapter<br/>(runtime/legacy.py)
+    participant LSF as LsfLauncher<br/>(launcher/lsf.py)
+    participant CLU as LSF Cluster<br/>(bsub/bkill)
+
+    Note over SCH: Build 阶段：CompileSim 依赖为空，优先入队
+    SCH->>ADP: submit_many([build_job])
+    ADP->>LSF: LsfLauncher(build_job)<br/>index=1, job_total=1
+    LSF->>LSF: make_job_script()<br/>scratch/lsf/{ts}/uart_*_build_default
+    LSF->>CLU: bsub -P {project} -J uart_*_build_default[1-1]<br/>-R rusage[vcssim=1,...]<br/>bash script $LSB_JOBINDEX
+    CLU-->>LSF: Job ID
+    loop poll_freq=1s
+        ADP->>LSF: poll()
+        LSF->>LSF: 读 {script}.1.out 判断 exit code
+    end
+    LSF-->>SCH: PASSED → 解除 RunTest 依赖
+
+    Note over SCH: Run 阶段：5 个 RunTest 在同一 submit_many 批次内累积
+    SCH->>ADP: submit_many([run_job_1..5])
+    ADP->>LSF: LsfLauncher ×5<br/>index=1..5, 前 4 个暂不发 bsub
+    Note over LSF: index == job_total 时才真正提交
+    LSF->>LSF: make_job_script()<br/>case 1) make ... run ;;<br/>case 2) make ... run ;;<br/>... case 5) ...
+    LSF->>CLU: bsub -J uart_*_run_default[1-5]%100<br/>-c {timeout_mins}<br/>-R rusage[vcssim=1,...]
+    CLU-->>LSF: Array Job ID [1..5]
+
+    par LSF 并行执行 5 个 slot
+        CLU->>CLU: slot 1: make -f sim.mk run<br/>> 0.uart_smoke.S0/run.log
+        CLU->>CLU: slot 2: make -f sim.mk run<br/>> 1.uart_smoke.S1/run.log
+        CLU->>CLU: slot 3..5: ...
+    end
+
+    loop 每个 array slot poll
+        ADP->>LSF: poll()
+        LSF->>LSF: 读 {script}.{i}.out<br/>解析 "Successfully completed" / exit code
+        LSF->>LSF: _check_status() 扫 run.log<br/>匹配 pass/fail patterns
+    end
+    LSF-->>SCH: 5 × PASSED/FAILED 事件
+
+    Note over SCH: --cov 时：全部 run 完成后 CovMerge → CovReport
+    SCH->>ADP: submit_many([cov_merge])
+    ADP->>LSF: 独立 bsub array (cov_merge)
+    SCH->>ADP: submit_many([cov_report])
+```
+
+**LSF 关键实现细节**：
+
+1. **延迟批量提交**：同 `job_name` 的 N 个 `LsfLauncher` 在 `submit_many` 批次内累积，仅 **index == N** 的最后一个触发 `bsub`（`lsf.py:190-193`），避免为每个 job 单独写脚本（NFS 上 I/O 开销大）。Scheduler 在 build 完成后通常一次性将多个就绪 run 放入同一批次 dispatch。
+2. **单一 bash 脚本 + case 分支**：`make_job_script` 生成 `case $LSB_JOBINDEX in 1) cmd1;; 2) cmd2;; ... esac`（`lsf.py:119-132`），每个 slot 执行 `deploy.cmd`（即 `make -f sim.mk build/run`）并重定向到各自 `run.log` / `build.log`。
+3. **License 申请**：VCS 自动附加 `-R 'rusage[vcssim=1,vcssim_dynamic=1:duration=1]'`（`lsf.py:218-244`）；Xcelium 类似。
+4. **Array 并发上限**：超过 100 个 slot 时加 `%100` 限制同时运行数（`lsf.py:213-215`）。
+5. **状态轮询**：不用 `bjobs`（大规模时太慢），改读 `{job_script}.{index}.out` 中的 LSF 邮件格式输出判断完成（`lsf.py:328-339`）。
+6. **工作目录**：`prepare_workspace_for_cfg` 在 `{scratch}/lsf/{timestamp}/` 下创建脚本目录（`lsf.py:93-96`）；`--remote` 时 scratch 为集群共享路径，脚本与 log 均在其下。
+7. **优雅退出**：SIGINT/SIGTERM → Scheduler `bkill` 所有 running job（`lsf.py:426-434`，`core.py:516-551`）。
+
+#### 3.5.4 Build 与 Run 在 LSF 上的时序关系
+
+```mermaid
+gantt
+    title uart smoke 回归在 LSF 上的典型时序（2 build_mode, 6 run）
+    dateFormat X
+    axisFormat %s
+
+    section Build
+    build_default       :b1, 0, 3
+    build_cover_reg_top :b2, 0, 3
+
+    section Run (default mode)
+    run 0.uart_smoke    :r1, after b1, 2
+    run 1.uart_smoke    :r2, after b1, 2
+    run 2..4.uart_smoke :r3, after b1, 2
+
+    section Run (cover_reg_top)
+    run 0.uart_csr_hw_reset :r4, after b2, 2
+
+    section Coverage
+    cov_merge  :cm, after r4, 1
+    cov_report :cr, after cm, 1
+```
+
+说明：
+- 两个 `CompileSim` **互不依赖**，Scheduler 可同时提交两个 build array（受 `max_parallel` 和 `VCS` 资源限制）。
+- `default` 模式下 5 个 `RunTest` 合并为 **一个** `bsub` array `[1-5]`，LSF 集群并行跑 5 个 slot。
+- `cover_reg_top` 的 1 个 `RunTest` 在对应 build 通过后单独提交（或与同 build_mode 的其他 run 合并 array）。
+- `--build-only` 只生成 build job；`--run-only` 跳过 build（假定已编译）。
+
+#### 3.5.5 资源管理与命令行
+
+```bash
+# 使用 LSF 后端（站点环境变量）
+export DVSIM_BACKEND=lsf
+export DVSIM_MAX_PARALLEL=32          # 同时提交/轮询的 job 上限
+
+# 复制 repo 到 scratch 后在集群路径执行
+dvsim uart_sim_cfg.hjson -i smoke --remote
+
+# 限制 VCS license 并发
+dvsim uart_sim_cfg.hjson -i nightly --cov -R VCS=20
+
+# 强制本地执行（调试用）
+dvsim uart_sim_cfg.hjson -i smoke --local --max-parallel 4
+```
+
+| 机制 | 代码位置 | 作用 |
+|---|---|---|
+| DAG + Kahn 拓扑校验 | `core.py:181-241` | 防止循环依赖 |
+| 依赖传播 | `core.py:335-360` | build 失败 → run Killed；CovMerge 允许部分 run 失败 |
+| 就绪堆优先级 | `runner.py:108-112` | build 先于 run，cov 最后 |
+| `-R RESOURCE=N` | `resources.py:64-110` | license/资源级并发控制 |
+| StatusPrinter | `status_printer.py` | 按 target 分行显示 S/Q/R/P/F/K |
+| SIGINT 优雅退出 | `core.py:516-551` | kill running + 取消 queued |
 
 ### 3.6 测试计划驱动
 
