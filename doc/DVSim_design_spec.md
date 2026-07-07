@@ -1,7 +1,44 @@
 # DVSim 设计报告
 
-**版本**：v1.49.x
+**版本**：v1.49.12
 **定位**：面向 ASIC 项目的 EDA 工具流程编排系统（build & run system），用 Python 编写，以 Hjson 配置驱动，工具无关。
+
+---
+
+## 目录
+
+- [一、设计目标](#一设计目标)
+- [二、整体架构](#二整体架构)
+- [三、核心设计原则](#三核心设计原则)
+  - [3.1 配置驱动：Hjson + 通配符展开](#31-配置驱动hjson--通配符展开)
+    - [3.1.1 `import_cfgs` — 字段级叠加合并](#311-import_cfgs--字段级叠加合并)
+    - [3.1.2 `use_cfgs` — 配置级聚合（primary 配置）](#312-use_cfgs--配置级聚合primary-配置)
+    - [3.1.3 `import_cfgs` 与 `use_cfgs` 对比](#313-import_cfgs-与-use_cfgs-对比)
+  - [3.2 配置选型与合并原则（重点）](#32-配置选型与合并原则重点)
+    - [3.2.1 示例：`reseed` 的多路径叠加处理](#321-示例reseed-的多路径叠加处理)
+  - [3.3 工具无关性](#33-工具无关性)
+  - [3.4 模式抽象：build_modes / run_modes / tests / regressions](#34-模式抽象build_modes--run_modes--tests--regressions)
+  - [3.5 并行调度与资源管理](#35-并行调度与资源管理)
+    - [3.5.1 Sim 流程的 Job DAG（build → run → cov）](#351-sim-流程的-job-dagbuild--run--cov)
+    - [3.5.2 Scheduler 六态状态机](#352-scheduler-六态状态机)
+    - [3.5.3 LSF 管理全过程（结合 build / run job）](#353-lsf-管理全过程结合-build--run-job)
+    - [3.5.4 Build 与 Run 在 LSF 上的时序关系](#354-build-与-run-在-lsf-上的时序关系)
+    - [3.5.5 资源管理与命令行](#355-资源管理与命令行)
+  - [3.6 测试计划驱动](#36-测试计划驱动)
+  - [3.7 可观测性](#37-可观测性)
+  - [3.8 可扩展性](#38-可扩展性)
+- [四、功能与使用指南](#四功能与使用指南)
+  - [4.1 基本调用](#41-基本调用)
+  - [4.2 配置文件编写](#42-配置文件编写)
+    - [4.2.1 `ral_spec` — RAL 规范文件及其生成全过程](#421-ral_spec--ral-规范文件及其生成全过程)
+    - [4.2.2 `build_modes` — 编译模式](#422-build_modes--编译模式)
+    - [4.2.3 `run_modes` — 运行模式](#423-run_modes--运行模式)
+    - [4.2.4 `regressions` — 回归集](#424-regressions--回归集)
+  - [4.3 常用选项分组](#43-常用选项分组)
+  - [4.4 配置选型调试技巧](#44-配置选型调试技巧)
+  - [4.5 冲突处理约定（重要）](#45-冲突处理约定重要)
+- [五、设计取舍小结](#五设计取舍小结)
+- [附录 A：DVSim 命令行选项完整清单](#附录-advsim-命令行选项完整清单)
 
 ---
 
@@ -621,7 +658,7 @@ gantt
     run 0.uart_csr_hw_reset :r4, after b2, 2
 
     section Coverage
-    cov_merge  :cm, after r4, 1
+    cov_merge  :cm, after r1 r2 r3 r4, 1
     cov_report :cr, after cm, 1
 ```
 
@@ -833,7 +870,6 @@ sim.mk: gen_sv_flist（生成 filelist）→ do_build（${build_cmd} ${build_opt
 - IP 级用 `ip_hjson` + `regtool`；芯片级用 `top_hjson` + `topgen`。
 - 若 DUT 无需 RAL 模型，可不设 `ral_spec`（默认空字符串），同时 core 文件不声明 generator。
 
-
 #### 4.2.2 `build_modes` — 编译模式
 
 **作用**：定义一组编译期（及关联的运行期）选项集合，可被 test 引用或通过命令行启用，实现"同一 RTL、不同编译开关"的复用。
@@ -999,8 +1035,6 @@ run_modes ──定义运行开关──┘        │
                                    │
 regressions ──分组 test + 叠加选项──┘──→ CLI: -i <regression>
 ```
-
-
 
 ### 4.3 常用选项分组
 
