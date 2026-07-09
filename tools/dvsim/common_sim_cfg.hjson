@@ -45,7 +45,7 @@
   // Default simulation verbosity (l => UVM_LOW). Can be overridden by
   // the --verbosity command-line argument.
   verbosity: l
-
+  
   // Path to the dut instance (this is used in a couple of places such as coverage cfg
   // file, xprop cfg file etc. If this is different for your block, then override it with
   // the 'overrides' directive.
