@@ -15,10 +15,11 @@
   tool: vcs
 
   // Fusesoc core file used for building the file list.
-  fusesoc_core: ${vendor}:dv:${name}_sim:0.1
-
+  //fusesoc_core: ${vendor}:dv:${name}_sim:0.1
+  //TODO: provide  TB flistlist...
+  sv_flist: "xx1/xx2/xx3/design.f"
   // Testplan hjson file.
-  testplan: "{proj_root}/hw/ip/${name}/data/${name}_testplan.hjson"
+  //testplan: "{proj_root}/hw/ip/${name}/data/${name}_testplan.hjson"
 
 % if has_ral:
   // RAL spec - used to generate the RAL model.
@@ -27,12 +28,7 @@
 
   // Import additional common sim cfg files.
   import_cfgs: [// Project wide common sim cfg file
-                "{proj_root}/hw/dv/tools/dvsim/common_sim_cfg.hjson"
-% if has_ral:
-                ,
-                "{proj_root}/hw/dv/tools/dvsim/tests/csr_tests.hjson",
-                "{proj_root}/hw/dv/tools/dvsim/tests/mem_tests.hjson"
-% endif
+                "{dvsim_root}/tools/dvsim/common_sim_cfg.hjson"
   ]
 
   // Add additional tops for simulation.
