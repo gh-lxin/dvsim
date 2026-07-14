@@ -1,0 +1,29 @@
+// Copyright lowRISC contributors (OpenTitan project).
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+
+class ${name}_host_driver extends ${name}_driver;
+  `uvm_component_utils(${name}_host_driver)
+
+  // inherited from ${name}_driver:
+  // ${name}_agent_cfg: cfg
+  // reset_signals / on_enter_reset / on_leave_reset
+
+  `uvm_component_new
+
+  // drive host-mode transactions received from sequencer
+  virtual task get_and_drive();
+    forever begin
+      seq_item_port.get_next_item(req);
+      $cast(rsp, req.clone());
+      rsp.set_id_info(req);
+      `uvm_info(`gfn, $sformatf("rcvd item:\n%0s", req.sprint()), UVM_HIGH)
+      // TODO: do the host driving part
+      //
+      // send rsp back to seq
+      `uvm_info(`gfn, "item sent", UVM_HIGH)
+      seq_item_port.item_done(rsp);
+    end
+  endtask
+
+endclass
